@@ -85,10 +85,43 @@ class MultiHead(nn.Module):
     def __init__(self, n_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(n_heads)])
+        self.proj = nn.Linear(n_embd, n_embd)
+    def forward(self, x):
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.proj(out)
+        return out
+
+class FeedForward(nn.Module):
+    """a linear layer followed by a ReLU"""
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, n_embd * 4),
+            nn.ReLU(),
+            nn.Linear(4* n_embd, n_embd), #residual connection
+        )
 
     def forward(self, x):
-        return torch.cat([h(x) for h in self.heads], dim=-1)
+        return self.net(x)
 
+
+class Block(nn.Module):
+    """Transformer block: communication followed by computation"""
+
+    def __init__(self, n_embd, n_head):
+        #n_heads: embedding dimension, n_head: number of heads
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa_heads = MultiHead(n_head, head_size)
+        self.ffwd = FeedForward(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
+
+    def forward(self, x):
+        x = self.sa_heads(self.ln1(x))
+        x = self.ffwd(self.ln2(x))
+        return x
+    
 # super simple bigram model
 class BigramLanguageModel(nn.Module):
 
@@ -97,7 +130,12 @@ class BigramLanguageModel(nn.Module):
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.positional_embedding_table = nn.Embedding(block_size, n_embd)
-        self.sa_heads = MultiHead(4, n_embd//4)
+        self.blocks = nn.Sequential(
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+            nn.LayerNorm(n_embd),
+        )
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -106,7 +144,7 @@ class BigramLanguageModel(nn.Module):
         token_embd = self.token_embedding_table(idx) # (B,T,C)
         pos_embd = self.positional_embedding_table(torch.arange(T, device=device)) # (T,C)
         x = token_embd + pos_embd
-        x = self.sa_heads(x) #apply self attention
+        x = self.blocks(x)
         logits = self.lm_head(x) #(B, T, vocab_size)
 
         if targets is None:
